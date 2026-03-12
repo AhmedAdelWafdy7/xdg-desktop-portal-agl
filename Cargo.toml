@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 zbus        = { version = "5.1.1", features = ["tokio"] }
 zvariant    = { version = "4.2.0", features = ["gvariant"] }
-tokio       = { version = "1.50", features = ["rt", "io-util", "signal", "sync", "fs"] }
+tokio       = { version = "1.50", features = ["full"] }
 tracing     = "0.1"
 tracing-subscriber = "0.3"
 anyhow      = "1.0"
