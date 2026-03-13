@@ -129,7 +129,7 @@ fn load_config() -> AppearanceConfig {
     for path in &candidates {
         match std::fs::read_to_string(path) {
             Ok(content) => {
-                tracing::info!("settings loaded from {}",content);
+                tracing::info!("settings loaded from {}", path);
                 return parse_config(&content);
             }
             Err(_) => continue,
