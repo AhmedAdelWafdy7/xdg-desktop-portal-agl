@@ -1,5 +1,7 @@
-use zbus::connection;
+mod portals;
 
+use zbus::connection;
+use crate::portals::SettingsPortal;
 const INTERFACE_NAME: &str = "org.freedesktop.impl.portal.desktop.agl";
 const PORTAL_PATH:&str = "/org/freedesktop/portal/desktop";
 
@@ -11,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
     
     let connection = connection::Builder::session()?
     .name(INTERFACE_NAME)?
-    //.serve_at(PORTAL_PATH, iface)
+    .serve_at(PORTAL_PATH, SettingsPortal::new())?
     .build()
     .await?;
 

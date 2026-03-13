@@ -713,12 +713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1152,7 +1146,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zbus",
- "zvariant 4.2.0",
 ]
 
 [[package]]
@@ -1188,7 +1181,7 @@ dependencies = [
  "winnow",
  "zbus_macros",
  "zbus_names",
- "zvariant 5.10.0",
+ "zvariant",
 ]
 
 [[package]]
@@ -1202,8 +1195,8 @@ dependencies = [
  "quote",
  "syn",
  "zbus_names",
- "zvariant 5.10.0",
- "zvariant_utils 3.3.0",
+ "zvariant",
+ "zvariant_utils",
 ]
 
 [[package]]
@@ -1214,7 +1207,7 @@ checksum = "ffd8af6d5b78619bab301ff3c560a5bd22426150253db278f164d6cf3b72c50f"
 dependencies = [
  "serde",
  "winnow",
- "zvariant 5.10.0",
+ "zvariant",
 ]
 
 [[package]]
@@ -1222,18 +1215,6 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[package]]
-name = "zvariant"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2084290ab9a1c471c38fc524945837734fbf124487e105daec2bb57fd48c81fe"
-dependencies = [
- "endi",
- "serde",
- "static_assertions",
- "zvariant_derive 4.2.0",
-]
 
 [[package]]
 name = "zvariant"
@@ -1245,21 +1226,8 @@ dependencies = [
  "enumflags2",
  "serde",
  "winnow",
- "zvariant_derive 5.10.0",
- "zvariant_utils 3.3.0",
-]
-
-[[package]]
-name = "zvariant_derive"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73e2ba546bda683a90652bac4a279bc146adad1386f25379cf73200d2002c449"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn",
- "zvariant_utils 2.1.0",
+ "zvariant_derive",
+ "zvariant_utils",
 ]
 
 [[package]]
@@ -1272,18 +1240,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
- "zvariant_utils 3.3.0",
-]
-
-[[package]]
-name = "zvariant_utils"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c51bcff7cc3dbb5055396bcf774748c3dab426b4b8659046963523cee4808340"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "zvariant_utils",
 ]
 
 [[package]]
