@@ -2,13 +2,14 @@
 Description=XDG Desktop Portal for AGL
 PartOf=graphical-session.target
 After=graphical-session.target
-After=xdg-desktop-portal.service
+ConditionEnvironment=WAYLAND_DISPLAY
 
 [Service]
 Type=dbus
 BusName=org.freedesktop.impl.portal.desktop.agl
-ExecStart=@LIBEXECDIR@/xdg-desktop-portal-agl
+ExecStart=/usr/libexec/xdg-desktop-portal-agl
 Restart=on-failure
-RestartSec=1
-#MemoryMax=32M
-Slice=session.slice
+TimeoutStopSec=5
+
+[Install]
+WantedBy=xdg-desktop-portal.service
