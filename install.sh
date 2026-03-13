@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+DESTDIR="${DESTDIR:-}"
 PREFIX="${PREFIX:-/usr}"
 LIBEXECDIR="${LIBEXECDIR:-${PREFIX}/libexec}"
 DATADIR="${DATADIR:-${PREFIX}/share}"
