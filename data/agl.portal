@@ -1,4 +1,4 @@
 [portal]
 DBusName=org.freedesktop.impl.portal.desktop.agl
 Interfaces=org.freedesktop.impl.portal.Settings;
-UseIn=agl;weston;gnome;ubuntu
+UseIn=agl;
