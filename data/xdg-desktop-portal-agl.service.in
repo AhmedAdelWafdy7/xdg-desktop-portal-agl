@@ -1,9 +1,7 @@
 [Unit]
 Description=XDG Desktop Portal backend for AGL
-PartOf=graphical-session.target
-After=graphical-session.target
-After=weston-environment.service
-Requisite=graphical-session.target
+After=dbus.socket
+Requires=dbus.socket
 Before=xdg-desktop-portal.service
 
 [Service]
@@ -13,9 +11,7 @@ ExecStart=/usr/libexec/xdg-desktop-portal-agl
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=5
-PassEnvironment=WAYLAND_DISPLAY
-PassEnvironment=XDG_CURRENT_DESKTOP
-PassEnvironment=DBUS_SESSION_BUS_ADDRESS
+Environment=XDG_CURRENT_DESKTOP=AGL
 
 [Install]
 WantedBy=xdg-desktop-portal.service
