@@ -10,7 +10,6 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
 
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -44,13 +43,13 @@ impl PixelFormat {
             0x00000001 => Self::Xrgb8888,
             0x34324241 => Self::Abgr8888, // 'AB24'
             0x34324258 => Self::Xbgr8888, // 'XB24'
-            other      => Self::Unknown(other),
+            other => Self::Unknown(other),
         }
     }
 
     // Returns the number of bytes per pixel for this format, if known.
     pub fn bytes_per_pixel(self) -> Option<usize> {
-        match self{
+        match self {
             Self::Argb8888 | Self::Xrgb8888 | Self::Abgr8888 | Self::Xbgr8888 => Some(4),
             Self::Rgb565 => Some(2),
             Self::Invalid | Self::Unknown(_) => None,
@@ -91,8 +90,9 @@ impl PixelBuffer {
 // Driven forward by wayland dispatch callbacks.
 #[derive(Debug)]
 pub enum CaptureState {
-    Pending,    // Frame Requested, waiting for compositor buffer event.
-    BufferAllocated {   // Compositor told us the buffer size and format, we allocated a local buffer to receive the data.
+    Pending, // Frame Requested, waiting for compositor buffer event.
+    BufferAllocated {
+        // Compositor told us the buffer size and format, we allocated a local buffer to receive the data.
         width: u32,
         height: u32,
         stride: u32,

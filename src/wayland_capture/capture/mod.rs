@@ -1,17 +1,17 @@
 pub mod types;
 
-use std::os::unix::io::{OwnedFd, AsRawFd, BorrowedFd, FromRawFd};
 use libc;
+use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use wayland_client::{
+    QueueHandle,
     protocol::{
         wl_buffer::WlBuffer,
         wl_output::WlOutput,
         wl_shm::{Format, WlShm},
         wl_shm_pool::WlShmPool,
     },
-    QueueHandle,
 };
 
 use wayland_protocols_wlr::screencopy::v1::client::{
@@ -20,7 +20,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use types::CaptureError;
-use types::{PixelBuffer, PixelFormat, CaptureState};
+use types::{CaptureState, PixelBuffer, PixelFormat};
 
 // Abstract API for Capture backend.
 pub trait CaptureBackend {
@@ -50,7 +50,12 @@ impl wayland_client::Dispatch<ZwlrScreencopyFrameV1, ()> for WlrScreencopyState 
         let mut state_lock = state.state.lock().unwrap();
 
         match event {
-            Event::Buffer { format, width, height, stride} => {
+            Event::Buffer {
+                format,
+                width,
+                height,
+                stride,
+            } => {
                 let pixel_format = PixelFormat::from_raw(format.into());
                 let size = PixelBuffer::expected_size(stride, height).unwrap_or(0);
                 *state_lock = CaptureState::BufferAllocated {
@@ -64,7 +69,14 @@ impl wayland_client::Dispatch<ZwlrScreencopyFrameV1, ()> for WlrScreencopyState 
 
             Event::Ready { .. } => {
                 let prev = std::mem::replace(&mut *state_lock, CaptureState::Failed);
-                if let CaptureState::BufferAllocated { width, height, stride, format, data } = prev {
+                if let CaptureState::BufferAllocated {
+                    width,
+                    height,
+                    stride,
+                    format,
+                    data,
+                } = prev
+                {
                     let pixel_buffer = PixelBuffer {
                         data,
                         width,
@@ -143,20 +155,18 @@ impl WlrScreencopy {
 
     /// Allocate an anonymous shared memory file descriptor of the specified size using memfd_create, and return it as an OwnedFd. Returns an error if the allocation fails.
     pub fn allocate_shm(size: usize) -> Result<(OwnedFd, *mut libc::c_void), CaptureError> {
-        use std::ffi::CStr;
-        let fd = unsafe {
-            libc::memfd_create(
-                CStr::from_bytes_with_nul(b"wl_shm\0").unwrap().as_ptr(),
-                libc::MFD_CLOEXEC,
-            )
-        };
+        let fd = unsafe { libc::memfd_create(c"wl_shm".as_ptr(), libc::MFD_CLOEXEC) };
         if fd < 0 {
-            return Err(CaptureError::ShmAllocationFailed(std::io::Error::last_os_error()));
+            return Err(CaptureError::ShmAllocationFailed(
+                std::io::Error::last_os_error(),
+            ));
         }
         unsafe {
             if libc::ftruncate(fd, size as libc::off_t) < 0 {
                 libc::close(fd);
-                return Err(CaptureError::ShmAllocationFailed(std::io::Error::last_os_error()));
+                return Err(CaptureError::ShmAllocationFailed(
+                    std::io::Error::last_os_error(),
+                ));
             }
             let ptr = libc::mmap(
                 std::ptr::null_mut(),
@@ -168,7 +178,9 @@ impl WlrScreencopy {
             );
             if ptr == libc::MAP_FAILED {
                 libc::close(fd);
-                return Err(CaptureError::ShmAllocationFailed(std::io::Error::last_os_error()));
+                return Err(CaptureError::ShmAllocationFailed(
+                    std::io::Error::last_os_error(),
+                ));
             }
             Ok((OwnedFd::from_raw_fd(fd), ptr))
         }
@@ -191,28 +203,40 @@ impl CaptureBackend for WlrScreencopy {
         // request a frame, compositor will send buffer + buffer_done events, then ready or failed.
         let frame = self.manager.capture_output(0, output, &qh, ());
 
-        event_queue.roundtrip(&mut dispatch_state).map_err(|e| CaptureError::WaylandError(e.to_string()))?;
+        event_queue
+            .roundtrip(&mut dispatch_state)
+            .map_err(|e| CaptureError::WaylandError(e.to_string()))?;
 
         // inspect to know dimensions
         let (width, height, stride, format) = {
             let state_lock = shared_state.lock().unwrap();
             match &*state_lock {
-                CaptureState::BufferAllocated { width, height, stride, format, .. } => {
-                    (*width, *height, *stride, *format)
+                CaptureState::BufferAllocated {
+                    width,
+                    height,
+                    stride,
+                    format,
+                    ..
+                } => (*width, *height, *stride, *format),
+                _ => {
+                    return Err(CaptureError::CaptureFailed(
+                        "Failed to allocate buffer".to_string(),
+                    ));
                 }
-                _ => return Err(CaptureError::CaptureFailed("Failed to allocate buffer".to_string())),
             }
         };
 
-        let size = PixelBuffer::expected_size(stride, height).ok_or(CaptureError::CaptureFailed("Buffer size overflow".to_string()))?;
+        let size = PixelBuffer::expected_size(stride, height).ok_or(
+            CaptureError::CaptureFailed("Buffer size overflow".to_string()),
+        )?;
 
         let (fd, ptr) = Self::allocate_shm(size)?;
 
-        let borrowed_fd = unsafe {
-            BorrowedFd::borrow_raw(fd.as_raw_fd())
-        };
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
 
-        let pool = dispatch_state.shm.create_pool(borrowed_fd, size as i32, &qh, ());
+        let pool = dispatch_state
+            .shm
+            .create_pool(borrowed_fd, size as i32, &qh, ());
         let buffer = pool.create_buffer(
             0,
             width as i32,
@@ -224,20 +248,25 @@ impl CaptureBackend for WlrScreencopy {
                 PixelFormat::Xbgr8888 => Format::Xbgr8888,
                 PixelFormat::Abgr8888 => Format::Abgr8888,
                 PixelFormat::Rgb565 => Format::Rgb565,
-                PixelFormat::Invalid | PixelFormat::Unknown(_) => return Err(CaptureError::CaptureFailed("Invalid pixel format".to_string())),
+                PixelFormat::Invalid | PixelFormat::Unknown(_) => {
+                    return Err(CaptureError::CaptureFailed(
+                        "Invalid pixel format".to_string(),
+                    ));
+                }
             },
             &qh,
-            ());
+            (),
+        );
 
         // copy frame to buffer
         frame.copy(&buffer);
 
         // wait for ready or failed
-        event_queue.roundtrip(&mut dispatch_state).map_err(|e| CaptureError::WaylandError(e.to_string()))?;
+        event_queue
+            .roundtrip(&mut dispatch_state)
+            .map_err(|e| CaptureError::WaylandError(e.to_string()))?;
 
-        let pixel_data = unsafe {
-            std::slice::from_raw_parts(ptr as *const u8, size)
-        }.to_vec();
+        let pixel_data = unsafe { std::slice::from_raw_parts(ptr as *const u8, size) }.to_vec();
 
         unsafe {
             libc::munmap(ptr, size);
@@ -250,11 +279,16 @@ impl CaptureBackend for WlrScreencopy {
             }
         }
 
-        let final_state = Arc::try_unwrap(shared_state).map_err(|_| CaptureError::CaptureFailed("Failed to unwrap shared state".to_string()))?.into_inner().unwrap();
+        let final_state = Arc::try_unwrap(shared_state)
+            .map_err(|_| CaptureError::CaptureFailed("Failed to unwrap shared state".to_string()))?
+            .into_inner()
+            .unwrap();
         match final_state {
             CaptureState::Ready(pixel_buffer) => Ok(pixel_buffer),
             CaptureState::Failed => Err(CaptureError::CaptureFailed("Capture failed".to_string())),
-            _ => Err(CaptureError::CaptureFailed("Unexpected capture state".to_string())),
+            _ => Err(CaptureError::CaptureFailed(
+                "Unexpected capture state".to_string(),
+            )),
         }
     }
 }
