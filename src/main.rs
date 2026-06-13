@@ -1,21 +1,21 @@
 mod portals;
 
-use zbus::connection;
 use crate::portals::SettingsPortal;
+use zbus::connection;
 const INTERFACE_NAME: &str = "org.freedesktop.impl.portal.desktop.agl";
-const PORTAL_PATH:&str = "/org/freedesktop/portal/desktop";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     tracing::info!("Starting xdg-desktop-portal-agl...");
-    
+
     let connection = connection::Builder::session()?
-    .name(INTERFACE_NAME)?
-    .serve_at(PORTAL_PATH, SettingsPortal::new())?
-    .build()
-    .await?;
+        .name(INTERFACE_NAME)?
+        .serve_at(PORTAL_PATH, SettingsPortal::new())?
+        .build()
+        .await?;
 
     tracing::info!("xdg-desktop-portal-agl is running.");
     tracing::info!("D-Bus name: {}", INTERFACE_NAME);
@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         }
         _ = wait_for_signal() => {
             tracing::info!("Received SIGINT, shutting down.");
-        } 
+        }
     }
 
     drop(connection);
@@ -35,9 +35,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn wait_for_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
 
-    let mut sigterm = signal(SignalKind::terminate())
-    .expect("Failed to set up signal handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to set up signal handler");
     sigterm.recv().await;
 }
