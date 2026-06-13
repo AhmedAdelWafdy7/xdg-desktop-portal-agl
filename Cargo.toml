@@ -12,6 +12,10 @@ build = "build.rs"
 name = "xdg-desktop-portal-agl"
 path = "src/main.rs"
 
+[lib]
+name = "wayland_capture"
+path = "src/wayland_capture/lib.rs"
+
 [dependencies]
 zbus               = { version = "5.1.1", features = ["tokio"] }
 tokio              = { version = "1.50", features = ["full"] }
@@ -19,3 +23,7 @@ tracing            = "0.1"
 tracing-subscriber = "0.3"
 anyhow             = "1.0"
 thiserror          = "2.0"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.2", features = ["client"] }
+libc = "0.2.186"
