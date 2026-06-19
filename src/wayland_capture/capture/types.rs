@@ -1,14 +1,19 @@
-// Copyright 2026 Ahmed Wafdy <ahmedadelwafdy782@gmail.com>. All rights reserved.
+// Copyright 2026 Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 //
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation; either version 2 of the License, or
+// This file is part of xdg-desktop-portal-agl.
+//
+// xdg-desktop-portal-agl is free software: you can redistribute it and/or
+// modify it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 2 of the License, or
 // (at your option) any later version.
 //
-// This program is distributed in the hope that it will be useful,
+// xdg-desktop-portal-agl is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+// Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along with
+// xdg-desktop-portal-agl. If not, see <https://www.gnu.org/licenses/>.
 
 use thiserror::Error;
 

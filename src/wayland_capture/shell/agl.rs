@@ -14,12 +14,3 @@
 //
 // You should have received a copy of the GNU General Public License along with
 // xdg-desktop-portal-agl. If not, see <https://www.gnu.org/licenses/>.
-
-pub mod capture;
-pub mod error;
-pub mod shell;
-
-#[cfg(test)]
-mod tests;
-
-pub use capture::types::{PixelBuffer, PixelFormat};
