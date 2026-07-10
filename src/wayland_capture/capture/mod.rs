@@ -15,7 +15,9 @@
 // You should have received a copy of the GNU General Public License along with
 // xdg-desktop-portal-agl. If not, see <https://www.gnu.org/licenses/>.
 
+pub mod agl;
 pub mod types;
+pub mod weston;
 
 use libc;
 use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -157,6 +159,40 @@ impl wayland_client::Dispatch<WlShm, ()> for WlrScreencopyState {
     }
 }
 
+/// Allocate an anonymous shared-memory file of `size` bytes via `memfd_create`, map it, and
+/// return the owning fd plus the mapping pointer. Shared by all wl_shm-based capture backends.
+pub(crate) fn allocate_shm(size: usize) -> Result<(OwnedFd, *mut libc::c_void), CaptureError> {
+    let fd = unsafe { libc::memfd_create(c"wl_shm".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(CaptureError::ShmAllocationFailed(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    unsafe {
+        if libc::ftruncate(fd, size as libc::off_t) < 0 {
+            libc::close(fd);
+            return Err(CaptureError::ShmAllocationFailed(
+                std::io::Error::last_os_error(),
+            ));
+        }
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        );
+        if ptr == libc::MAP_FAILED {
+            libc::close(fd);
+            return Err(CaptureError::ShmAllocationFailed(
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok((OwnedFd::from_raw_fd(fd), ptr))
+    }
+}
+
 /// Concrete implementation of the CaptureBackend trait for Wayland using the wlr-screencopy protocol.
 /// wlr-screencopy is a protocol extension for Wayland compositors that allows clients to capture the contents of outputs (screens) in a secure and efficient manner. This struct encapsulates the necessary Wayland objects and state to perform screen capture operations.
 /// It works for both wlroots-based compositors and agl-compositors.
@@ -172,35 +208,7 @@ impl WlrScreencopy {
 
     /// Allocate an anonymous shared memory file descriptor of the specified size using memfd_create, and return it as an OwnedFd. Returns an error if the allocation fails.
     pub fn allocate_shm(size: usize) -> Result<(OwnedFd, *mut libc::c_void), CaptureError> {
-        let fd = unsafe { libc::memfd_create(c"wl_shm".as_ptr(), libc::MFD_CLOEXEC) };
-        if fd < 0 {
-            return Err(CaptureError::ShmAllocationFailed(
-                std::io::Error::last_os_error(),
-            ));
-        }
-        unsafe {
-            if libc::ftruncate(fd, size as libc::off_t) < 0 {
-                libc::close(fd);
-                return Err(CaptureError::ShmAllocationFailed(
-                    std::io::Error::last_os_error(),
-                ));
-            }
-            let ptr = libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            );
-            if ptr == libc::MAP_FAILED {
-                libc::close(fd);
-                return Err(CaptureError::ShmAllocationFailed(
-                    std::io::Error::last_os_error(),
-                ));
-            }
-            Ok((OwnedFd::from_raw_fd(fd), ptr))
-        }
+        allocate_shm(size)
     }
 }
 

@@ -26,4 +26,7 @@ thiserror          = "2.0"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.2", features = ["client"] }
+wayland-scanner = "0.31"
+wayland-backend = "0.3"
 libc = "0.2.186"
+png = "0.17"

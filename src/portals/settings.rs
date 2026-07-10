@@ -55,7 +55,7 @@ impl SettingsPortal {
 
 #[interface(name = "org.freedesktop.impl.portal.Settings")]
 impl SettingsPortal {
-    #[zbus(property)]
+    #[zbus(property, name = "version")]
     async fn version(&self) -> u32 {
         2
     }
