@@ -37,7 +37,10 @@ use capture::weston::WestonCapture;
 /// Connect to the compositor, select a capture backend, and screenshot the chosen output.
 ///
 /// Backend precedence is weston-output-capture (primary on AGL), then agl-screenshooter
-/// (legacy fallback), then wlr-screencopy. Returns the raw captured [`PixelBuffer`].
+/// (legacy fallback), then wlr-screencopy. wlr-screencopy exists for wlroots-based dev
+/// desktops only; no libweston/AGL compositor advertises `zwlr_screencopy_manager_v1`,
+/// so in practice it and the two AGL-native backends above are mutually exclusive.
+/// Returns the raw captured [`PixelBuffer`].
 pub fn capture_output(selector: &OutputSelector) -> Result<PixelBuffer, CaptureError> {
     let connection = probe::connect()?;
     capture_on(&connection, selector)

@@ -44,14 +44,6 @@ pub struct AglState {
     pub bind_state: Arc<Mutex<AglBindState>>,
 }
 
-impl AglState {
-    pub fn new(_bind_state: Arc<Mutex<AglBindState>>) -> Self {
-        Self {
-            bind_state: Arc::new(Mutex::new(AglBindState::Pending)),
-        }
-    }
-}
-
 impl wayland_client::Dispatch<AglShell, ()> for AglState {
     fn event(
         state: &mut Self,

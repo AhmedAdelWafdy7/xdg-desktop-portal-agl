@@ -116,12 +116,12 @@ pub struct PixelBuffer {
 impl PixelBuffer {
     // Total Expected size of the pixel buffer in bytes, calculated from width, height, stride, and format. Returns None in overflow.
     pub fn expected_size(stride: u32, height: u32) -> Option<usize> {
-        let size = (stride as u64).checked_mul(height as u64)? as usize;
-        const MAX_BUFFER_SIZE: usize = 4 * 1024 * 1024 * 1024; // 4 GiB
+        const MAX_BUFFER_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+        let size = (stride as u64).checked_mul(height as u64)?;
         if size > MAX_BUFFER_SIZE {
             None
         } else {
-            Some(size)
+            usize::try_from(size).ok()
         }
     }
 
@@ -130,6 +130,22 @@ impl PixelBuffer {
         let start = y.checked_mul(self.stride)? as usize;
         let end = start.checked_add(self.stride as usize)?;
         self.data.get(start..end)
+    }
+
+    /// Decode a single pixel at (x, y) into RGBA8 without materializing the whole frame.
+    pub fn pixel_rgba8(&self, x: u32, y: u32) -> Result<[u8; 4], CaptureError> {
+        let bpp = self
+            .format
+            .bytes_per_pixel()
+            .ok_or(CaptureError::UnsupportedFormat(self.format))?;
+        let row = self
+            .row(y)
+            .ok_or_else(|| CaptureError::CaptureFailed("buffer shorter than height".into()))?;
+        let start = x as usize * bpp;
+        let px = row
+            .get(start..start + bpp)
+            .ok_or_else(|| CaptureError::CaptureFailed("row shorter than width".into()))?;
+        decode_pixel(px, self.format)
     }
 
     /// Convert the captured buffer into a tightly-packed RGBA8 image (width * height * 4 bytes),

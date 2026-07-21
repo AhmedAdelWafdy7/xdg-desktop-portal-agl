@@ -145,14 +145,8 @@ impl ScreenshotPortal {
 
 /// Sample the centre pixel of the buffer as sRGB components in [0, 1].
 fn center_color(buffer: &PixelBuffer) -> Result<(f64, f64, f64), wayland_capture::CaptureError> {
-    let rgba = buffer.to_rgba8()?;
-    let x = (buffer.width / 2) as usize;
-    let y = (buffer.height / 2) as usize;
-    let i = (y * buffer.width as usize + x) * 4;
-    let r = rgba[i] as f64 / 255.0;
-    let g = rgba[i + 1] as f64 / 255.0;
-    let b = rgba[i + 2] as f64 / 255.0;
-    Ok((r, g, b))
+    let [r, g, b, _a] = buffer.pixel_rgba8(buffer.width / 2, buffer.height / 2)?;
+    Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0))
 }
 
 /// Write the PNG to the user's pictures directory (or a temp dir) and return a `file://` URI.
@@ -167,7 +161,24 @@ fn save_png(png: &[u8]) -> std::io::Result<String> {
     let path = dir.join(format!("Screenshot-{ts}.png"));
     std::fs::write(&path, png)?;
 
-    Ok(format!("file://{}", path.display()))
+    Ok(format!("file://{}", percent_encode_path(&path)))
+}
+
+/// Percent-encode a filesystem path for use in a `file://` URI, preserving `/` separators
+/// and escaping everything outside RFC 3986's unreserved set (including non-UTF-8 bytes).
+fn percent_encode_path(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut out = String::new();
+    for &b in path.as_os_str().as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Pick a destination directory: $XDG_PICTURES_DIR, else ~/Pictures, else the system temp dir.
