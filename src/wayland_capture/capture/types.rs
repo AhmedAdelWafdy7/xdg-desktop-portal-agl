@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License along with
 // xdg-desktop-portal-agl. If not, see <https://www.gnu.org/licenses/>.
 
+use std::io::Write;
+
 use thiserror::Error;
 
 use wayland_client::protocol::wl_shm::Format as WlShmFormat;
@@ -31,6 +33,8 @@ pub enum CaptureError {
     UnsupportedFormat(PixelFormat),
     #[error("PNG encoding failed: {0}")]
     EncodingFailed(String),
+    #[error("timed out after {0:?} waiting for the compositor")]
+    Timeout(std::time::Duration),
 }
 
 // Pixel format of the captured frame. Mirrioring the wl_shm_format on embedded targets.
@@ -104,9 +108,69 @@ impl PixelFormat {
     }
 }
 
+/// An `mmap`'d shared-memory region the compositor writes capture pixels into.
+pub struct ShmMapping {
+    ptr: *mut libc::c_void,
+    len: usize,
+}
+
+unsafe impl Send for ShmMapping {}
+
+impl ShmMapping {
+    pub(crate) unsafe fn new(ptr: *mut libc::c_void, len: usize) -> Self {
+        Self { ptr, len }
+    }
+}
+
+impl std::ops::Deref for ShmMapping {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
+    }
+}
+
+impl std::fmt::Debug for ShmMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShmMapping")
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl Drop for ShmMapping {
+    fn drop(&mut self) {
+        // SAFETY: sole owner of this mapping; nothing else can be using `ptr` past this point.
+        unsafe {
+            libc::munmap(self.ptr, self.len);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum PixelData {
+    Owned(Vec<u8>),
+    Mapped(ShmMapping),
+}
+
+impl std::ops::Deref for PixelData {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(v) => v,
+            Self::Mapped(m) => m,
+        }
+    }
+}
+
+impl From<Vec<u8>> for PixelData {
+    fn from(v: Vec<u8>) -> Self {
+        Self::Owned(v)
+    }
+}
+
 #[derive(Debug)]
 pub struct PixelBuffer {
-    pub data: Vec<u8>,
+    pub data: PixelData,
     pub width: u32,
     pub height: u32,
     pub stride: u32,
@@ -148,49 +212,67 @@ impl PixelBuffer {
         decode_pixel(px, self.format)
     }
 
-    /// Convert the captured buffer into a tightly-packed RGBA8 image (width * height * 4 bytes),
-    /// performing any channel swizzle required by the source format. Fully-opaque alpha (0xFF) is
-    /// substituted for the padding byte of the X-formats.
-    pub fn to_rgba8(&self) -> Result<Vec<u8>, CaptureError> {
+    fn decode_row_into(&self, y: u32, out: &mut [u8]) -> Result<(), CaptureError> {
         let bpp = self
             .format
             .bytes_per_pixel()
             .ok_or(CaptureError::UnsupportedFormat(self.format))?;
+        let row = self
+            .row(y)
+            .ok_or_else(|| CaptureError::CaptureFailed("buffer shorter than height".into()))?;
+        for x in 0..self.width as usize {
+            let px = row
+                .get(x * bpp..x * bpp + bpp)
+                .ok_or_else(|| CaptureError::CaptureFailed("row shorter than width".into()))?;
+            out[x * 4..x * 4 + 4].copy_from_slice(&decode_pixel(px, self.format)?);
+        }
+        Ok(())
+    }
 
+    /// Convert the captured buffer into a tightly-packed RGBA8 image (width * height * 4 bytes),
+    /// performing any channel swizzle required by the source format. Fully-opaque alpha (0xFF) is
+    /// substituted for the padding byte of the X-formats.
+    pub fn to_rgba8(&self) -> Result<Vec<u8>, CaptureError> {
         let width = self.width as usize;
-        let height = self.height as usize;
-        let mut out = Vec::with_capacity(width * height * 4);
+        let mut out = Vec::with_capacity(width * self.height as usize * 4);
+        let mut row_buf = vec![0u8; width * 4];
 
         for y in 0..self.height {
-            let row = self
-                .row(y)
-                .ok_or_else(|| CaptureError::CaptureFailed("buffer shorter than height".into()))?;
-            for x in 0..width {
-                let px = row
-                    .get(x * bpp..x * bpp + bpp)
-                    .ok_or_else(|| CaptureError::CaptureFailed("row shorter than width".into()))?;
-                let [r, g, b, a] = decode_pixel(px, self.format)?;
-                out.extend_from_slice(&[r, g, b, a]);
-            }
+            self.decode_row_into(y, &mut row_buf)?;
+            out.extend_from_slice(&row_buf);
         }
 
         Ok(out)
     }
 
     /// Encode the captured buffer as a PNG image, returning the encoded bytes.
+    ///
+    /// Streams one row at a time through the encoder instead of building the full RGBA image
+    /// first: for a 1080p frame that's the difference between holding ~8 MB and a few KB of
+    /// converted pixels at once — the dominant cost in a capture's peak memory footprint.
     pub fn encode_png(&self) -> Result<Vec<u8>, CaptureError> {
-        let rgba = self.to_rgba8()?;
-
         let mut buf = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut buf, self.width, self.height);
             encoder.set_color(png::ColorType::Rgba);
             encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
             let mut writer = encoder
                 .write_header()
                 .map_err(|e| CaptureError::EncodingFailed(e.to_string()))?;
-            writer
-                .write_image_data(&rgba)
+            let mut stream = writer
+                .stream_writer()
+                .map_err(|e| CaptureError::EncodingFailed(e.to_string()))?;
+
+            let mut row_buf = vec![0u8; self.width as usize * 4];
+            for y in 0..self.height {
+                self.decode_row_into(y, &mut row_buf)?;
+                stream
+                    .write_all(&row_buf)
+                    .map_err(|e| CaptureError::EncodingFailed(e.to_string()))?;
+            }
+            stream
+                .finish()
                 .map_err(|e| CaptureError::EncodingFailed(e.to_string()))?;
         }
 
@@ -232,13 +314,12 @@ fn decode_pixel(px: &[u8], format: PixelFormat) -> Result<[u8; 4], CaptureError>
 #[derive(Debug)]
 pub enum CaptureState {
     Pending, // Frame Requested, waiting for compositor buffer event.
+    // Compositor told us the buffer geometry. The pixels themselves land in the shm mapping.
     BufferAllocated {
-        // Compositor told us the buffer size and format, we allocated a local buffer to receive the data.
         width: u32,
         height: u32,
         stride: u32,
         format: PixelFormat,
-        data: Vec<u8>,
     },
 
     Ready(PixelBuffer), // Buffer is ready to be read by the caller.

@@ -33,7 +33,6 @@ use wayland_client::{
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 use crate::capture::types::CaptureError;
-use crate::protocols::agl_screenshooter::client::agl_screenshooter::AglScreenshooter;
 use crate::protocols::weston_output_capture::client::weston_capture_v1::WestonCaptureV1;
 use crate::registry::{Capabilities, GlobalInfo};
 
@@ -58,13 +57,14 @@ pub enum OutputSelector {
 }
 
 /// An open connection to the compositor with the globals required for screenshotting bound.
+#[derive(Clone)]
 pub struct WaylandConnection {
     pub conn: Connection,
+    pub registry: WlRegistry,
     pub shm: WlShm,
     pub outputs: Vec<OutputInfo>,
     pub weston_capture: Option<WestonCaptureV1>,
     pub wlr_screencopy: Option<ZwlrScreencopyManagerV1>,
-    pub agl_screenshooter: Option<AglScreenshooter>,
     pub capabilities: Capabilities,
 }
 
@@ -106,7 +106,6 @@ pub fn connect() -> Result<WaylandConnection, CaptureError> {
     let mut shm: Option<WlShm> = None;
     let mut weston_capture: Option<WestonCaptureV1> = None;
     let mut wlr_screencopy: Option<ZwlrScreencopyManagerV1> = None;
-    let mut agl_screenshooter: Option<AglScreenshooter> = None;
 
     for g in &contents {
         let info = GlobalInfo {
@@ -114,9 +113,6 @@ pub fn connect() -> Result<WaylandConnection, CaptureError> {
             version: g.version,
         };
         match g.interface.as_str() {
-            "wl_compositor" => caps.wl_compositor = Some(info),
-            "xdg_wm_base" => caps.xdg_wm_base = Some(info),
-            "agl_shell" => caps.agl_shell = Some(info),
             "wl_shm" => {
                 caps.wl_shm = Some(info);
                 shm = Some(registry.bind::<WlShm, _, _>(g.name, g.version.min(1), &qh, ()));
@@ -135,17 +131,10 @@ pub fn connect() -> Result<WaylandConnection, CaptureError> {
                     (),
                 ));
             }
-            "agl_screenshooter" => {
-                caps.agl_screenshooter = Some(info);
-                agl_screenshooter = Some(registry.bind::<AglScreenshooter, _, _>(
-                    g.name,
-                    g.version.min(1),
-                    &qh,
-                    (),
-                ));
-            }
+            // Recorded but not bound: the agl backend rebinds by global name onto its own
+            // event queue, because `done` is emitted on the global itself.
+            "agl_screenshooter" => caps.agl_screenshooter = Some(info),
             "wl_output" => {
-                caps.output.push(info);
                 let idx = state.outputs.len();
                 let wl_output = registry.bind::<WlOutput, _, _>(g.name, g.version.min(4), &qh, idx);
                 state.outputs.push(OutputInfo {
@@ -169,11 +158,11 @@ pub fn connect() -> Result<WaylandConnection, CaptureError> {
 
     Ok(WaylandConnection {
         conn,
+        registry: registry.clone(),
         shm,
         outputs: state.outputs,
         weston_capture,
         wlr_screencopy,
-        agl_screenshooter,
         capabilities: caps,
     })
 }
@@ -221,50 +210,4 @@ impl wayland_client::Dispatch<WlOutput, usize> for ProbeState {
     }
 }
 
-impl wayland_client::Dispatch<WlShm, ()> for ProbeState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlShm,
-        _event: wayland_client::protocol::wl_shm::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl wayland_client::Dispatch<WestonCaptureV1, ()> for ProbeState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WestonCaptureV1,
-        _event: <WestonCaptureV1 as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl wayland_client::Dispatch<ZwlrScreencopyManagerV1, ()> for ProbeState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwlrScreencopyManagerV1,
-        _event: <ZwlrScreencopyManagerV1 as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl wayland_client::Dispatch<AglScreenshooter, ()> for ProbeState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &AglScreenshooter,
-        _event: <AglScreenshooter as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
+crate::capture::impl_noop_dispatch!(ProbeState, WlShm, WestonCaptureV1, ZwlrScreencopyManagerV1);

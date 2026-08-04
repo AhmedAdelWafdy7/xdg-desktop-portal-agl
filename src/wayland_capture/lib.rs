@@ -16,16 +16,14 @@
 // xdg-desktop-portal-agl. If not, see <https://www.gnu.org/licenses/>.
 
 pub mod capture;
-pub mod error;
 pub mod probe;
 pub mod protocols;
 pub mod registry;
-pub mod shell;
 
 #[cfg(test)]
 mod tests;
 
-pub use capture::types::{CaptureError, PixelBuffer, PixelFormat};
+pub use capture::types::{CaptureError, PixelBuffer, PixelData, PixelFormat};
 pub use probe::{OutputSelector, WaylandConnection};
 
 use capture::CaptureBackend;
@@ -33,6 +31,7 @@ use capture::WlrScreencopy;
 use capture::WlrScreencopyState;
 use capture::agl::AglScreenshot;
 use capture::weston::WestonCapture;
+use registry::SelectedCapturebackend;
 
 /// Connect to the compositor, select a capture backend, and screenshot the chosen output.
 ///
@@ -60,28 +59,44 @@ pub fn capture_on(
         .select_output(selector)
         .ok_or_else(|| CaptureError::CaptureFailed(format!("no such output: {selector:?}")))?;
 
-    if let Some(factory) = &connection.weston_capture {
-        let backend = WestonCapture::new(factory.clone(), connection.shm.clone());
-        return backend.capture(&connection.conn, &output.wl_output);
-    }
+    let missing =
+        |what: &str| CaptureError::CaptureFailed(format!("{what} advertised but not bound"));
 
-    if let Some(info) = connection.capabilities.agl_screenshooter {
-        let backend = AglScreenshot::new(info.name, info.version.min(1), connection.shm.clone());
-        return backend.capture(
-            &connection.conn,
-            &output.wl_output,
-            output.width,
-            output.height,
-        );
+    match connection.capabilities.selected_capture_backend() {
+        Some(SelectedCapturebackend::WestonScreenshooter) => {
+            let factory = connection
+                .weston_capture
+                .as_ref()
+                .ok_or_else(|| missing("weston_capture_v1"))?;
+            let backend = WestonCapture::new(factory.clone(), connection.shm.clone());
+            backend.capture(&connection.conn, &output.wl_output)
+        }
+        Some(SelectedCapturebackend::AglScreenshooter) => {
+            let info = connection
+                .capabilities
+                .agl_screenshooter
+                .ok_or_else(|| missing("agl_screenshooter"))?;
+            let backend =
+                AglScreenshot::new(info.name, info.version.min(1), connection.shm.clone());
+            backend.capture(
+                &connection.conn,
+                &connection.registry,
+                &output.wl_output,
+                output.width,
+                output.height,
+            )
+        }
+        Some(SelectedCapturebackend::WlrScreencopy) => {
+            let manager = connection
+                .wlr_screencopy
+                .as_ref()
+                .ok_or_else(|| missing("zwlr_screencopy_manager_v1"))?;
+            let mut event_queue = connection.conn.new_event_queue::<WlrScreencopyState>();
+            let mut backend = WlrScreencopy::new(manager.clone(), connection.shm.clone());
+            backend.capture(&connection.conn, &output.wl_output, &mut event_queue)
+        }
+        None => Err(CaptureError::CaptureFailed(
+            "compositor exposes no supported screenshot protocol".into(),
+        )),
     }
-
-    if let Some(manager) = &connection.wlr_screencopy {
-        let mut event_queue = connection.conn.new_event_queue::<WlrScreencopyState>();
-        let mut backend = WlrScreencopy::new(manager.clone(), connection.shm.clone());
-        return backend.capture(&output.wl_output, &mut event_queue);
-    }
-
-    Err(CaptureError::CaptureFailed(
-        "compositor exposes no supported screenshot protocol".into(),
-    ))
 }

@@ -22,7 +22,8 @@ use zbus::connection;
 const INTERFACE_NAME: &str = "org.freedesktop.impl.portal.desktop.agl";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 
-#[tokio::main]
+// A single-threaded runtime is enough.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
