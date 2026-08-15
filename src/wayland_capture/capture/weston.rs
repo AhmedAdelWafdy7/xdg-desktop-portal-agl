@@ -28,6 +28,52 @@
 
 use std::time::Instant;
 
+trait Destroy {
+    fn destroy(&self);
+}
+
+impl Destroy for WestonCaptureSourceV1 {
+    fn destroy(&self) {
+        WestonCaptureSourceV1::destroy(self);
+    }
+}
+
+impl Destroy for WlShmPool {
+    fn destroy(&self) {
+        WlShmPool::destroy(self);
+    }
+}
+
+impl Destroy for WlBuffer {
+    fn destroy(&self) {
+        WlBuffer::destroy(self);
+    }
+}
+
+struct Guard<T: Destroy>(Option<T>);
+
+impl<T: Destroy> Guard<T> {
+    fn new(v: T) -> Self {
+        Self(Some(v))
+    }
+
+    fn get(&self) -> &T {
+        self.0.as_ref().expect("guard used after being disarmed")
+    }
+
+    fn disarm(mut self) -> T {
+        self.0.take().unwrap()
+    }
+}
+
+impl<T: Destroy> Drop for Guard<T> {
+    fn drop(&mut self) {
+        if let Some(v) = &self.0 {
+            v.destroy();
+        }
+    }
+}
+
 use wayland_client::{
     Connection, QueueHandle,
     protocol::{
@@ -122,18 +168,18 @@ impl WestonCapture {
             state.format = None;
             state.sync_done = false;
 
-            let source = self.factory.create(output, candidate, qh, ());
+            let source = Guard::new(self.factory.create(output, candidate, qh, ()));
             let _sync = conn.display().sync(qh, ());
 
             dispatch_until(conn, event_queue, state, deadline, |s| {
-                s.format.is_some() || s.sync_done
+                (s.format.is_some() && s.width > 0 && s.height > 0) || s.sync_done
             })?;
 
             if state.format.is_some() {
                 tracing::info!("weston capture source: {candidate:?}");
+                let source = source.disarm();
                 return Ok((source, candidate));
             }
-            source.destroy();
         }
 
         Err(CaptureError::CaptureFailed(
@@ -156,6 +202,7 @@ impl WestonCapture {
         let (source, _kind) =
             self.negotiate_source(conn, output, &qh, &mut event_queue, &mut state, deadline)?;
 
+        let source = Guard::new(source);
         for _ in 0..MAX_ATTEMPTS {
             let format = state
                 .format
@@ -194,9 +241,10 @@ impl WestonCapture {
                 shm_format,
                 size,
             );
-
+            let _pool = Guard::new(pool);
+            let buffer = Guard::new(buffer);
             state.status = Status::Pending;
-            source.capture(&buffer);
+            source.get().capture(buffer.get());
 
             dispatch_until(conn, &mut event_queue, &mut state, deadline, |s| {
                 !matches!(s.status, Status::Pending)
@@ -205,9 +253,6 @@ impl WestonCapture {
             let outcome = state.status.clone();
             match outcome {
                 Status::Complete => {
-                    buffer.destroy();
-                    pool.destroy();
-                    source.destroy();
                     // `mapping` moves into the buffer here; reading through it later avoids a
                     // full-frame copy. Unmapped automatically once the caller drops the buffer.
                     return Ok(PixelBuffer {
@@ -219,14 +264,9 @@ impl WestonCapture {
                     });
                 }
                 Status::Retry => {
-                    buffer.destroy();
-                    pool.destroy();
                     continue;
                 }
                 Status::Failed(msg) => {
-                    buffer.destroy();
-                    pool.destroy();
-                    source.destroy();
                     return Err(CaptureError::CaptureFailed(format!(
                         "weston capture failed: {msg}"
                     )));
@@ -235,7 +275,6 @@ impl WestonCapture {
             }
         }
 
-        source.destroy();
         Err(CaptureError::CaptureFailed(
             "weston capture exceeded retry limit".into(),
         ))

@@ -12,9 +12,10 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 test -x "$AGL/bin/weston" || { echo "no weston at $AGL/bin (set AGL correctly)"; exit 1; }
 echo "using $("$AGL/bin/weston" --version)"
 
-# 1. Clean up any stale compositor squatting on the socket.
-pkill -x weston 2>/dev/null || true
-pkill -x agl-compositor 2>/dev/null || true
+# 1. Clean up any stale compositor squatting on the socket. Scoped to processes
+#    launched with -S "$SOCK" so this never kills a host desktop session's compositor.
+pkill -f "weston.*-S $SOCK" 2>/dev/null || true
+pkill -f "agl-compositor.*-S $SOCK" 2>/dev/null || true
 sleep 1
 rm -f "$XDG_RUNTIME_DIR/$SOCK" "$XDG_RUNTIME_DIR/$SOCK.lock"
 

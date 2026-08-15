@@ -126,7 +126,7 @@ pub fn connect() -> Result<WaylandConnection, CaptureError> {
                 caps.zwlr_screencopy_manager = Some(info);
                 wlr_screencopy = Some(registry.bind::<ZwlrScreencopyManagerV1, _, _>(
                     g.name,
-                    g.version.min(3),
+                    g.version.min(1),
                     &qh,
                     (),
                 ));

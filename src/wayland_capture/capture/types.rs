@@ -180,7 +180,7 @@ pub struct PixelBuffer {
 impl PixelBuffer {
     // Total Expected size of the pixel buffer in bytes, calculated from width, height, stride, and format. Returns None in overflow.
     pub fn expected_size(stride: u32, height: u32) -> Option<usize> {
-        const MAX_BUFFER_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+        const MAX_BUFFER_SIZE: u64 = i32::MAX as u64;
         let size = (stride as u64).checked_mul(height as u64)?;
         if size > MAX_BUFFER_SIZE {
             None
