@@ -5,7 +5,7 @@ authors = ["Ahmed Wafdy <ahmedadelwafdy782@gmail.com>"]
 edition = "2024"
 description = "XDG Desktop Portal backend for AGL (Automotive Grade Linux)"
 repository = "https://github.com/AhmedAdelWafdy7/xdg-desktop-portal-agl"
-license = "LGPL-2.1"
+license = "GPL-2.0-or-later"
 build = "build.rs"  
 
 [[bin]]
