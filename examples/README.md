@@ -157,3 +157,8 @@ pkill -x weston                      # stop it when done
   agl-screenshooter, wlr-screencopy). GNOME/mutter is one such case.
 - The `output-name` selector needs a compositor that sends `wl_output.name`
   (version 4+). On older outputs, omit the name to grab the first output.
+- The daemon takes its output, pixel-source and timeout settings from the
+  environment (`XDP_AGL_OUTPUT`, `XDP_AGL_CAPTURE_SOURCE`,
+  `XDP_AGL_CAPTURE_TIMEOUT_MS`) — see the Configuration table in the top-level
+  README. `XDP_AGL_CAPTURE_SOURCE` and `XDP_AGL_CAPTURE_TIMEOUT_MS` apply to
+  this example too, since it goes through the same capture library.

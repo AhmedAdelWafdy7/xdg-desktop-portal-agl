@@ -3,6 +3,8 @@ name = "xdg-desktop-portal-agl"
 version = "0.1.0"
 authors = ["Ahmed Wafdy <ahmedadelwafdy782@gmail.com>"]
 edition = "2024"
+# edition 2024 needs 1.85; u32::is_multiple_of (weston.rs) needs 1.87.
+rust-version = "1.87"
 description = "XDG Desktop Portal backend for AGL (Automotive Grade Linux)"
 repository = "https://github.com/AhmedAdelWafdy7/xdg-desktop-portal-agl"
 license = "GPL-2.0-or-later"
