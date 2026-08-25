@@ -26,7 +26,6 @@ mod tests;
 pub use capture::types::{CaptureError, PixelBuffer, PixelData, PixelFormat};
 pub use probe::{OutputSelector, WaylandConnection};
 
-use capture::CaptureBackend;
 use capture::WlrScreencopy;
 use capture::WlrScreencopyState;
 use capture::agl::AglScreenshot;

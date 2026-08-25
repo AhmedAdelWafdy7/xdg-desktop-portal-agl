@@ -20,7 +20,7 @@ pub mod types;
 pub mod weston;
 
 use libc;
-use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -42,14 +42,56 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 use types::CaptureError;
 use types::{CaptureState, PixelBuffer, PixelData, PixelFormat, ShmMapping};
 
-// Abstract API for Capture backend.
-pub trait CaptureBackend {
-    fn capture(
-        &mut self,
-        conn: &Connection,
-        output: &WlOutput,
-        event_queue: &mut wayland_client::EventQueue<WlrScreencopyState>,
-    ) -> Result<PixelBuffer, CaptureError>;
+/// A Wayland object with a destructor request.
+pub(crate) trait Destroy {
+    fn destroy(&self);
+}
+
+impl Destroy for WlShmPool {
+    fn destroy(&self) {
+        WlShmPool::destroy(self);
+    }
+}
+
+impl Destroy for WlBuffer {
+    fn destroy(&self) {
+        WlBuffer::destroy(self);
+    }
+}
+
+/// Destroys the object it holds when it goes out of scope, so an early return on any of the
+/// several fallible steps of a capture cannot leak a protocol object.
+pub(crate) struct Guard<T: Destroy>(Option<T>);
+
+impl<T: Destroy> Guard<T> {
+    pub(crate) fn new(v: T) -> Self {
+        Self(Some(v))
+    }
+
+    pub(crate) fn get(&self) -> &T {
+        self.0.as_ref().expect("guard used after being disarmed")
+    }
+
+    /// Hand ownership back to the caller; the object outlives the guard.
+    pub(crate) fn disarm(mut self) -> T {
+        self.0.take().unwrap()
+    }
+
+    /// Destroy the guarded object now rather than at scope exit, so a caller can control the
+    /// order it is torn down in relative to guards declared after it. Idempotent.
+    pub(crate) fn destroy_now(&mut self) {
+        if let Some(v) = self.0.take() {
+            v.destroy();
+        }
+    }
+}
+
+impl<T: Destroy> Drop for Guard<T> {
+    fn drop(&mut self) {
+        if let Some(v) = &self.0 {
+            v.destroy();
+        }
+    }
 }
 
 macro_rules! impl_noop_dispatch {
@@ -73,7 +115,7 @@ pub(crate) use impl_noop_dispatch;
 
 /// Bind a `wl_shm_pool`/`wl_buffer` pair over `fd` and hand back the buffer alongside the pool
 /// that owns it (callers must `destroy()` both once done). Shared by every wl_shm-based
-/// backend, which otherwise each repeat this same `BorrowedFd` + two protocol requests.
+/// backend, which otherwise each repeat these same two protocol requests.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_shm_buffer<S>(
     shm: &WlShm,
@@ -88,8 +130,7 @@ pub(crate) fn create_shm_buffer<S>(
 where
     S: wayland_client::Dispatch<WlShmPool, ()> + wayland_client::Dispatch<WlBuffer, ()> + 'static,
 {
-    let borrowed = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
-    let pool = shm.create_pool(borrowed, size as i32, qh, ());
+    let pool = shm.create_pool(fd.as_fd(), size as i32, qh, ());
     let buffer = pool.create_buffer(0, width, height, stride, format, qh, ());
     (pool, buffer)
 }
@@ -180,7 +221,9 @@ pub(crate) fn dispatch_until<S, F>(
 where
     F: Fn(&S) -> bool,
 {
-    let budget = capture_timeout();
+    // Report the budget this call actually had, not the configured total: `deadline` is shared
+    // across the phases of one capture, so a later phase inherits whatever an earlier one left.
+    let started = Instant::now();
     loop {
         queue
             .dispatch_pending(state)
@@ -191,7 +234,9 @@ where
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(CaptureError::Timeout(budget));
+            return Err(CaptureError::Timeout(
+                deadline.saturating_duration_since(started),
+            ));
         }
 
         queue
@@ -285,10 +330,8 @@ impl WlrScreencopy {
     pub fn new(manager: ZwlrScreencopyManagerV1, shm: WlShm) -> Self {
         Self { manager, shm }
     }
-}
 
-impl CaptureBackend for WlrScreencopy {
-    fn capture(
+    pub fn capture(
         &mut self,
         conn: &Connection,
         output: &WlOutput,
@@ -388,9 +431,12 @@ impl CaptureBackend for WlrScreencopy {
             }
         });
 
+        // Frame first: after a Timeout the compositor may still be mid-copy, and destroying the
+        // frame is what cancels it. Releasing the buffer and pool it is writing into ahead of
+        // that would hand back memory still in use.
+        frame.destroy();
         buffer.destroy();
         pool.destroy();
-        frame.destroy();
 
         result
     }

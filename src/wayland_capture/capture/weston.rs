@@ -28,52 +28,6 @@
 
 use std::time::Instant;
 
-trait Destroy {
-    fn destroy(&self);
-}
-
-impl Destroy for WestonCaptureSourceV1 {
-    fn destroy(&self) {
-        WestonCaptureSourceV1::destroy(self);
-    }
-}
-
-impl Destroy for WlShmPool {
-    fn destroy(&self) {
-        WlShmPool::destroy(self);
-    }
-}
-
-impl Destroy for WlBuffer {
-    fn destroy(&self) {
-        WlBuffer::destroy(self);
-    }
-}
-
-struct Guard<T: Destroy>(Option<T>);
-
-impl<T: Destroy> Guard<T> {
-    fn new(v: T) -> Self {
-        Self(Some(v))
-    }
-
-    fn get(&self) -> &T {
-        self.0.as_ref().expect("guard used after being disarmed")
-    }
-
-    fn disarm(mut self) -> T {
-        self.0.take().unwrap()
-    }
-}
-
-impl<T: Destroy> Drop for Guard<T> {
-    fn drop(&mut self) {
-        if let Some(v) = &self.0 {
-            v.destroy();
-        }
-    }
-}
-
 use wayland_client::{
     Connection, QueueHandle,
     protocol::{
@@ -83,11 +37,17 @@ use wayland_client::{
 };
 
 use crate::capture::types::{CaptureError, PixelBuffer, PixelData, PixelFormat};
-use crate::capture::{allocate_shm, capture_timeout, dispatch_until};
+use crate::capture::{Destroy, Guard, allocate_shm, capture_timeout, dispatch_until};
 use crate::protocols::weston_output_capture::client::weston_capture_source_v1::{
     self, WestonCaptureSourceV1,
 };
 use crate::protocols::weston_output_capture::client::weston_capture_v1::{Source, WestonCaptureV1};
+
+impl Destroy for WestonCaptureSourceV1 {
+    fn destroy(&self) {
+        WestonCaptureSourceV1::destroy(self);
+    }
+}
 
 /// Maximum number of `retry` cycles honoured before giving up. A retry happens when the buffer
 /// parameters change between the initial events and the capture; a couple should always suffice.
@@ -100,7 +60,7 @@ pub struct WestonCapture {
 }
 
 // Terminal outcome of a single `capture` request, driven by the source object's events.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Status {
     Pending,
     Complete,
@@ -165,7 +125,12 @@ impl WestonCapture {
         };
 
         for &candidate in candidates {
+            // Reset all three: a candidate that delivered `size` but no `format` would otherwise
+            // leave stale dimensions behind that satisfy the next candidate's predicate, pairing
+            // one source's geometry with another's format.
             state.format = None;
+            state.width = 0;
+            state.height = 0;
             state.sync_done = false;
 
             let source = Guard::new(self.factory.create(output, candidate, qh, ()));
@@ -202,7 +167,7 @@ impl WestonCapture {
         let (source, _kind) =
             self.negotiate_source(conn, output, &qh, &mut event_queue, &mut state, deadline)?;
 
-        let source = Guard::new(source);
+        let mut source = Guard::new(source);
         for _ in 0..MAX_ATTEMPTS {
             let format = state
                 .format
@@ -246,11 +211,19 @@ impl WestonCapture {
             state.status = Status::Pending;
             source.get().capture(buffer.get());
 
-            dispatch_until(conn, &mut event_queue, &mut state, deadline, |s| {
+            if let Err(e) = dispatch_until(conn, &mut event_queue, &mut state, deadline, |s| {
                 !matches!(s.status, Status::Pending)
-            })?;
+            }) {
+                // On a Timeout the compositor may still be mid-blit into `buffer`. Destroying
+                // the source cancels the capture, so it has to go before the buffer and pool
+                // guards below release the memory it would be writing into.
+                source.destroy_now();
+                return Err(e);
+            }
 
-            let outcome = state.status.clone();
+            // Take the status rather than cloning it: the Failed arm owns a String, and the
+            // state is reset to Pending at the top of the next attempt anyway.
+            let outcome = std::mem::replace(&mut state.status, Status::Pending);
             match outcome {
                 Status::Complete => {
                     // `mapping` moves into the buffer here; reading through it later avoids a
