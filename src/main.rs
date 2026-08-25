@@ -17,12 +17,13 @@
 
 mod portals;
 
-use crate::portals::SettingsPortal;
+use crate::portals::{ScreenshotPortal, SettingsPortal};
 use zbus::connection;
 const INTERFACE_NAME: &str = "org.freedesktop.impl.portal.desktop.agl";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 
-#[tokio::main]
+// A single-threaded runtime is enough.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -31,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let connection = connection::Builder::session()?
         .name(INTERFACE_NAME)?
         .serve_at(PORTAL_PATH, SettingsPortal::new())?
+        .serve_at(PORTAL_PATH, ScreenshotPortal::new())?
         .build()
         .await?;
 

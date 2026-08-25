@@ -15,14 +15,17 @@
 // You should have received a copy of the GNU General Public License along with
 // xdg-desktop-portal-agl. If not, see <https://www.gnu.org/licenses/>.
 
+pub mod agl;
 pub mod types;
+pub mod weston;
 
 use libc;
-use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use wayland_client::{
-    QueueHandle,
+    Connection, EventQueue, QueueHandle,
     protocol::{
         wl_buffer::WlBuffer,
         wl_output::WlOutput,
@@ -37,21 +40,104 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use types::CaptureError;
-use types::{CaptureState, PixelBuffer, PixelFormat};
+use types::{CaptureState, PixelBuffer, PixelData, PixelFormat, ShmMapping};
 
-// Abstract API for Capture backend.
-pub trait CaptureBackend {
-    fn capture(
-        &mut self,
-        output: &WlOutput,
-        event_queue: &mut wayland_client::EventQueue<WlrScreencopyState>,
-    ) -> Result<PixelBuffer, CaptureError>;
+/// A Wayland object with a destructor request.
+pub(crate) trait Destroy {
+    fn destroy(&self);
+}
+
+impl Destroy for WlShmPool {
+    fn destroy(&self) {
+        WlShmPool::destroy(self);
+    }
+}
+
+impl Destroy for WlBuffer {
+    fn destroy(&self) {
+        WlBuffer::destroy(self);
+    }
+}
+
+/// Destroys the object it holds when it goes out of scope, so an early return on any of the
+/// several fallible steps of a capture cannot leak a protocol object.
+pub(crate) struct Guard<T: Destroy>(Option<T>);
+
+impl<T: Destroy> Guard<T> {
+    pub(crate) fn new(v: T) -> Self {
+        Self(Some(v))
+    }
+
+    pub(crate) fn get(&self) -> &T {
+        self.0.as_ref().expect("guard used after being disarmed")
+    }
+
+    /// Hand ownership back to the caller; the object outlives the guard.
+    pub(crate) fn disarm(mut self) -> T {
+        self.0.take().unwrap()
+    }
+
+    /// Destroy the guarded object now rather than at scope exit, so a caller can control the
+    /// order it is torn down in relative to guards declared after it. Idempotent.
+    pub(crate) fn destroy_now(&mut self) {
+        if let Some(v) = self.0.take() {
+            v.destroy();
+        }
+    }
+}
+
+impl<T: Destroy> Drop for Guard<T> {
+    fn drop(&mut self) {
+        if let Some(v) = &self.0 {
+            v.destroy();
+        }
+    }
+}
+
+macro_rules! impl_noop_dispatch {
+    ($state:ty, $($proxy:ty),+ $(,)?) => {
+        $(
+            impl wayland_client::Dispatch<$proxy, ()> for $state {
+                fn event(
+                    _state: &mut Self,
+                    _proxy: &$proxy,
+                    _event: <$proxy as wayland_client::Proxy>::Event,
+                    _data: &(),
+                    _conn: &wayland_client::Connection,
+                    _qh: &QueueHandle<Self>,
+                ) {
+                }
+            }
+        )+
+    };
+}
+pub(crate) use impl_noop_dispatch;
+
+/// Bind a `wl_shm_pool`/`wl_buffer` pair over `fd` and hand back the buffer alongside the pool
+/// that owns it (callers must `destroy()` both once done). Shared by every wl_shm-based
+/// backend, which otherwise each repeat these same two protocol requests.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_shm_buffer<S>(
+    shm: &WlShm,
+    qh: &QueueHandle<S>,
+    fd: &OwnedFd,
+    width: i32,
+    height: i32,
+    stride: i32,
+    format: Format,
+    size: usize,
+) -> (WlShmPool, WlBuffer)
+where
+    S: wayland_client::Dispatch<WlShmPool, ()> + wayland_client::Dispatch<WlBuffer, ()> + 'static,
+{
+    let pool = shm.create_pool(fd.as_fd(), size as i32, qh, ());
+    let buffer = pool.create_buffer(0, width, height, stride, format, qh, ());
+    (pool, buffer)
 }
 
 // Dispatch state for the screencopy protocol.
 pub struct WlrScreencopyState {
     pub state: Arc<Mutex<CaptureState>>,
-    pub shm: WlShm,
 }
 
 impl wayland_client::Dispatch<ZwlrScreencopyFrameV1, ()> for WlrScreencopyState {
@@ -73,14 +159,11 @@ impl wayland_client::Dispatch<ZwlrScreencopyFrameV1, ()> for WlrScreencopyState 
                 height,
                 stride,
             } => {
-                let pixel_format = PixelFormat::from_raw(format.into());
-                let size = PixelBuffer::expected_size(stride, height).unwrap_or(0);
                 *state_lock = CaptureState::BufferAllocated {
                     width,
                     height,
                     stride,
-                    format: pixel_format,
-                    data: vec![0u8; size],
+                    format: PixelFormat::from_raw(format.into()),
                 };
             }
 
@@ -91,17 +174,16 @@ impl wayland_client::Dispatch<ZwlrScreencopyFrameV1, ()> for WlrScreencopyState 
                     height,
                     stride,
                     format,
-                    data,
                 } = prev
                 {
-                    let pixel_buffer = PixelBuffer {
-                        data,
+                    // The pixels are in the caller's shm mapping; `data` is filled in there.
+                    *state_lock = CaptureState::Ready(PixelBuffer {
+                        data: PixelData::Owned(Vec::new()),
                         width,
                         height,
                         stride,
                         format,
-                    };
-                    *state_lock = CaptureState::Ready(pixel_buffer);
+                    });
                 } else {
                     *state_lock = CaptureState::Failed;
                 }
@@ -111,55 +193,134 @@ impl wayland_client::Dispatch<ZwlrScreencopyFrameV1, ()> for WlrScreencopyState 
                 *state_lock = CaptureState::Failed;
             }
 
-            Event::BufferDone => {}
-
+            // `buffer_done` signals no more buffer offers are coming.
             _ => {}
         }
     }
 }
 
-impl wayland_client::Dispatch<WlShmPool, ()> for WlrScreencopyState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlShmPool,
-        _event: wayland_client::protocol::wl_shm_pool::Event,
-        _data: &(),
-        _conn: &wayland_client::Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        // No events to handle for WlShmPool in this context.
+impl_noop_dispatch!(WlrScreencopyState, WlShmPool, WlBuffer, WlShm);
+
+/// How long a single capture may wait on the compositor before giving up.
+pub(crate) fn capture_timeout() -> Duration {
+    std::env::var("XDP_AGL_CAPTURE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5))
+}
+
+/// Dispatch events on `queue` until `done(state)` is true or `deadline` passes.
+pub(crate) fn dispatch_until<S, F>(
+    conn: &Connection,
+    queue: &mut EventQueue<S>,
+    state: &mut S,
+    deadline: Instant,
+    done: F,
+) -> Result<(), CaptureError>
+where
+    F: Fn(&S) -> bool,
+{
+    // Report the budget this call actually had, not the configured total: `deadline` is shared
+    // across the phases of one capture, so a later phase inherits whatever an earlier one left.
+    let started = Instant::now();
+    loop {
+        queue
+            .dispatch_pending(state)
+            .map_err(|e| CaptureError::WaylandError(format!("dispatch: {e}")))?;
+        if done(state) {
+            return Ok(());
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(CaptureError::Timeout(
+                deadline.saturating_duration_since(started),
+            ));
+        }
+
+        queue
+            .flush()
+            .map_err(|e| CaptureError::WaylandError(format!("flush: {e}")))?;
+
+        // `None` means events arrived between the dispatch above and here; go round again.
+        let Some(guard) = queue.prepare_read() else {
+            continue;
+        };
+
+        let mut pfd = libc::pollfd {
+            fd: conn.backend().poll_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        let timeout_ms = remaining
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32;
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+
+        match rc {
+            // Re-check the deadline at the top of the loop rather than assuming it has passed.
+            0 => continue,
+            n if n < 0 => {
+                let err = std::io::Error::last_os_error();
+                // Drop the read guard before retrying, or the next prepare_read deadlocks.
+                drop(guard);
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(CaptureError::WaylandError(format!("poll: {err}")));
+            }
+            _ => {
+                guard
+                    .read()
+                    .map_err(|e| CaptureError::WaylandError(format!("read events: {e}")))?;
+            }
+        }
     }
 }
 
-impl wayland_client::Dispatch<WlBuffer, ()> for WlrScreencopyState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlBuffer,
-        _event: wayland_client::protocol::wl_buffer::Event,
-        _data: &(),
-        _conn: &wayland_client::Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        // No events to handle for WlBuffer in this context.
+/// Allocate an anonymous shared-memory file of `size` bytes via `memfd_create`, map it, and
+/// return the owning fd plus the mapping. Shared by all wl_shm-based capture backends.
+pub(crate) fn allocate_shm(size: usize) -> Result<(OwnedFd, ShmMapping), CaptureError> {
+    let fd = unsafe { libc::memfd_create(c"wl_shm".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(CaptureError::ShmAllocationFailed(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    unsafe {
+        if libc::ftruncate(fd, size as libc::off_t) < 0 {
+            libc::close(fd);
+            return Err(CaptureError::ShmAllocationFailed(
+                std::io::Error::last_os_error(),
+            ));
+        }
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        );
+        if ptr == libc::MAP_FAILED {
+            libc::close(fd);
+            return Err(CaptureError::ShmAllocationFailed(
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok((OwnedFd::from_raw_fd(fd), ShmMapping::new(ptr, size)))
     }
 }
 
-impl wayland_client::Dispatch<WlShm, ()> for WlrScreencopyState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlShm,
-        _event: wayland_client::protocol::wl_shm::Event,
-        _data: &(),
-        _conn: &wayland_client::Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        // No events to handle for WlShm in this context.
-    }
-}
-
-/// Concrete implementation of the CaptureBackend trait for Wayland using the wlr-screencopy protocol.
-/// wlr-screencopy is a protocol extension for Wayland compositors that allows clients to capture the contents of outputs (screens) in a secure and efficient manner. This struct encapsulates the necessary Wayland objects and state to perform screen capture operations.
-/// It works for both wlroots-based compositors and agl-compositors.
+/// Capture backend for `zwlr_screencopy_v1`.
+///
+/// This is the wlroots-only backend, and the lowest-precedence one: no libweston/AGL compositor
+/// advertises `zwlr_screencopy_manager_v1`. It exists so the portal is usable on a wlroots dev
+/// desktop (and wlroots-based kiosks such as cage/sway); on an AGL target the weston or agl
+/// backend is selected instead.
 pub struct WlrScreencopy {
     manager: ZwlrScreencopyManagerV1,
     shm: WlShm,
@@ -170,142 +331,113 @@ impl WlrScreencopy {
         Self { manager, shm }
     }
 
-    /// Allocate an anonymous shared memory file descriptor of the specified size using memfd_create, and return it as an OwnedFd. Returns an error if the allocation fails.
-    pub fn allocate_shm(size: usize) -> Result<(OwnedFd, *mut libc::c_void), CaptureError> {
-        let fd = unsafe { libc::memfd_create(c"wl_shm".as_ptr(), libc::MFD_CLOEXEC) };
-        if fd < 0 {
-            return Err(CaptureError::ShmAllocationFailed(
-                std::io::Error::last_os_error(),
-            ));
-        }
-        unsafe {
-            if libc::ftruncate(fd, size as libc::off_t) < 0 {
-                libc::close(fd);
-                return Err(CaptureError::ShmAllocationFailed(
-                    std::io::Error::last_os_error(),
-                ));
-            }
-            let ptr = libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            );
-            if ptr == libc::MAP_FAILED {
-                libc::close(fd);
-                return Err(CaptureError::ShmAllocationFailed(
-                    std::io::Error::last_os_error(),
-                ));
-            }
-            Ok((OwnedFd::from_raw_fd(fd), ptr))
-        }
-    }
-}
-
-impl CaptureBackend for WlrScreencopy {
-    fn capture(
+    pub fn capture(
         &mut self,
+        conn: &Connection,
         output: &WlOutput,
         event_queue: &mut wayland_client::EventQueue<WlrScreencopyState>,
     ) -> Result<PixelBuffer, CaptureError> {
         let shared_state = Arc::new(Mutex::new(CaptureState::Pending));
         let mut dispatch_state = WlrScreencopyState {
             state: shared_state.clone(),
-            shm: self.shm.clone(),
         };
 
         let qh = event_queue.handle();
-        // request a frame, compositor will send buffer + buffer_done events, then ready or failed.
+        let deadline = Instant::now() + capture_timeout();
+        // request a frame, compositor will send buffer (+ buffer_done on protocol v3+), then ready or failed.
         let frame = self.manager.capture_output(0, output, &qh, ());
 
-        event_queue
-            .roundtrip(&mut dispatch_state)
-            .map_err(|e| CaptureError::WaylandError(e.to_string()))?;
+        // Wait for the first `Buffer` event, which is present on every protocol version
+        let geometry = dispatch_until(conn, event_queue, &mut dispatch_state, deadline, |s| {
+            !matches!(&*s.state.lock().unwrap(), CaptureState::Pending)
+        })
+        .and_then(|()| match &*shared_state.lock().unwrap() {
+            CaptureState::BufferAllocated {
+                width,
+                height,
+                stride,
+                format,
+            } => Ok((*width, *height, *stride, *format)),
+            _ => Err(CaptureError::CaptureFailed(
+                "Failed to allocate buffer".to_string(),
+            )),
+        });
 
-        // inspect to know dimensions
-        let (width, height, stride, format) = {
-            let state_lock = shared_state.lock().unwrap();
-            match &*state_lock {
-                CaptureState::BufferAllocated {
-                    width,
-                    height,
-                    stride,
-                    format,
-                    ..
-                } => (*width, *height, *stride, *format),
-                _ => {
-                    return Err(CaptureError::CaptureFailed(
-                        "Failed to allocate buffer".to_string(),
-                    ));
-                }
+        let (width, height, stride, format) = match geometry {
+            Ok(g) => g,
+            Err(e) => {
+                frame.destroy();
+                return Err(e);
             }
         };
 
-        let size = PixelBuffer::expected_size(stride, height).ok_or(
-            CaptureError::CaptureFailed("Buffer size overflow".to_string()),
-        )?;
+        let shm_format = match format.to_wl_shm_format() {
+            Some(f) => f,
+            None => {
+                frame.destroy();
+                return Err(CaptureError::UnsupportedFormat(format));
+            }
+        };
 
-        let (fd, ptr) = Self::allocate_shm(size)?;
+        let size = match PixelBuffer::expected_size(stride, height) {
+            Some(size) => size,
+            None => {
+                frame.destroy();
+                return Err(CaptureError::CaptureFailed(
+                    "Buffer size overflow".to_string(),
+                ));
+            }
+        };
 
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
+        let (fd, mapping) = match allocate_shm(size) {
+            Ok(v) => v,
+            Err(e) => {
+                frame.destroy();
+                return Err(e);
+            }
+        };
 
-        let pool = dispatch_state
-            .shm
-            .create_pool(borrowed_fd, size as i32, &qh, ());
-        let buffer = pool.create_buffer(
-            0,
+        let (pool, buffer) = create_shm_buffer(
+            &self.shm,
+            &qh,
+            &fd,
             width as i32,
             height as i32,
             stride as i32,
-            match format {
-                PixelFormat::Argb8888 => Format::Argb8888,
-                PixelFormat::Xrgb8888 => Format::Xrgb8888,
-                PixelFormat::Xbgr8888 => Format::Xbgr8888,
-                PixelFormat::Abgr8888 => Format::Abgr8888,
-                PixelFormat::Rgb565 => Format::Rgb565,
-                PixelFormat::Invalid | PixelFormat::Unknown(_) => {
-                    return Err(CaptureError::CaptureFailed(
-                        "Invalid pixel format".to_string(),
-                    ));
-                }
-            },
-            &qh,
-            (),
+            shm_format,
+            size,
         );
 
         // copy frame to buffer
         frame.copy(&buffer);
 
-        // wait for ready or failed
-        event_queue
-            .roundtrip(&mut dispatch_state)
-            .map_err(|e| CaptureError::WaylandError(e.to_string()))?;
+        // The compositor performs the copy at the next output repaint, which a wl_display.sync
+        // callback can outrun. Wait on the terminal state, not on a roundtrip.
+        let outcome = dispatch_until(conn, event_queue, &mut dispatch_state, deadline, |s| {
+            s.state.lock().unwrap().is_terminal()
+        });
 
-        let pixel_data = unsafe { std::slice::from_raw_parts(ptr as *const u8, size) }.to_vec();
-
-        unsafe {
-            libc::munmap(ptr, size);
-        }
-
-        {
-            let mut state_lock = shared_state.lock().unwrap();
-            if let CaptureState::Ready(ref mut pixel_buffer) = *state_lock {
-                pixel_buffer.data = pixel_data;
+        let result = outcome.and_then(|()| {
+            let final_state =
+                std::mem::replace(&mut *shared_state.lock().unwrap(), CaptureState::Pending);
+            match final_state.take_buffer() {
+                // Move the mapping straight into the buffer: reading through it later avoids
+                // the full-frame copy a `.to_vec()` here would cost.
+                Some(mut pixel_buffer) => {
+                    pixel_buffer.data = PixelData::Mapped(mapping);
+                    Ok(pixel_buffer)
+                }
+                None => Err(CaptureError::CaptureFailed("Capture failed".to_string())),
             }
-        }
+        });
 
-        let final_state = Arc::try_unwrap(shared_state)
-            .map_err(|_| CaptureError::CaptureFailed("Failed to unwrap shared state".to_string()))?
-            .into_inner()
-            .unwrap();
-        match final_state {
-            CaptureState::Ready(pixel_buffer) => Ok(pixel_buffer),
-            CaptureState::Failed => Err(CaptureError::CaptureFailed("Capture failed".to_string())),
-            _ => Err(CaptureError::CaptureFailed(
-                "Unexpected capture state".to_string(),
-            )),
-        }
+        // Frame first: after a Timeout the compositor may still be mid-copy, and destroying the
+        // frame is what cancels it. Releasing the buffer and pool it is writing into ahead of
+        // that would hand back memory still in use.
+        frame.destroy();
+        buffer.destroy();
+        pool.destroy();
+
+        result
     }
 }

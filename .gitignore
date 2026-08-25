@@ -1,2 +1,5 @@
 /target
 .vscode
+
+# Screenshot outputs from the capture example
+/*.png

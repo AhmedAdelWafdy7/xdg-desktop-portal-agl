@@ -14,3 +14,20 @@
 //
 // You should have received a copy of the GNU General Public License along with
 // xdg-desktop-portal-agl. If not, see <https://www.gnu.org/licenses/>.
+
+pub mod client {
+
+    use wayland_client;
+    use wayland_client::protocol::*;
+
+    pub mod __interfaces {
+        use wayland_backend;
+        use wayland_client::protocol::__interfaces::*;
+
+        wayland_scanner::generate_interfaces!("src/wayland_capture/protocols/agl/agl-shell.xml");
+    }
+
+    use self::__interfaces::*;
+
+    wayland_scanner::generate_client_code!("src/wayland_capture/protocols/agl/agl-shell.xml");
+}
