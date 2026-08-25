@@ -20,12 +20,16 @@
 //! connection together with the capture managers (weston-output-capture, wlr-screencopy or
 //! agl-screenshooter) that the compositor happens to advertise.
 
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
 use wayland_client::{
-    Connection, QueueHandle, WEnum,
+    Connection, EventQueue, Proxy, QueueHandle, WEnum,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_output::{self, WlOutput},
-        wl_registry::WlRegistry,
+        wl_callback::WlCallback,
+        wl_output::{self, Transform, WlOutput},
+        wl_registry::{self, WlRegistry},
         wl_shm::WlShm,
     },
 };
@@ -33,16 +37,55 @@ use wayland_client::{
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 use crate::capture::types::CaptureError;
+use crate::capture::{capture_timeout, dispatch_until};
 use crate::protocols::weston_output_capture::client::weston_capture_v1::WestonCaptureV1;
 use crate::registry::{Capabilities, GlobalInfo};
 
 /// A single output (screen) discovered on the compositor.
 #[derive(Debug, Clone)]
 pub struct OutputInfo {
+    /// Registry global name, which is what identifies the output across hotplug: indices shift
+    /// when an output is unplugged, this does not.
+    pub global_name: u32,
     pub wl_output: WlOutput,
     pub name: Option<String>,
+    /// Current mode size, in physical (pre-transform) pixels — that is what `wl_output.mode`
+    /// reports. On a rotated output this is *not* the logical size; see [`OutputInfo::transform`].
     pub width: i32,
     pub height: i32,
+    /// Rotation/flip the compositor applies between the framebuffer and the logical desktop.
+    pub transform: Transform,
+}
+
+impl OutputInfo {
+    fn new(global_name: u32, wl_output: WlOutput) -> Self {
+        Self {
+            global_name,
+            wl_output,
+            name: None,
+            width: 0,
+            height: 0,
+            transform: Transform::Normal,
+        }
+    }
+
+    /// Whether the transform swaps the width and height axes (90 / 270 degrees, with or without
+    /// a flip). Portrait instrument clusters and centre stacks are usually driven this way.
+    pub fn swaps_axes(&self) -> bool {
+        transform_swaps_axes(self.transform)
+    }
+}
+
+/// Whether `transform` exchanges the width and height axes.
+///
+/// The four rotations that do are 90 and 270, each with and without a flip; a flip on its own
+/// mirrors within the same axes. Split out from [`OutputInfo`] so it can be tested without a
+/// live compositor to bind a `wl_output` against.
+pub fn transform_swaps_axes(transform: Transform) -> bool {
+    matches!(
+        transform,
+        Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270
+    )
 }
 
 /// Selects which output to capture.
@@ -56,37 +99,84 @@ pub enum OutputSelector {
     Name(String),
 }
 
+/// The output list plus the queue that keeps it current.
+///
+/// `connect()` used to snapshot output geometry on an event queue that died as soon as it
+/// returned, so a cached connection served whatever the outputs looked like at first use —
+/// a mode change or a hotplug after that was never seen, and the agl backend would go on
+/// sizing its buffer from the stale numbers. Keeping the queue alive lets [`refresh`] pull
+/// the current state before each capture.
+struct OutputRegistry {
+    queue: EventQueue<ProbeState>,
+    state: ProbeState,
+}
+
+impl OutputRegistry {
+    /// Re-read output state from the compositor, bounded by the capture timeout.
+    ///
+    /// A plain `roundtrip` would block forever against a compositor that stops answering, which
+    /// is the same unbounded wait `dispatch_until` exists to avoid — the portal runs captures on
+    /// `spawn_blocking`, so a parked thread leaks per request.
+    fn refresh(&mut self, conn: &Connection) -> Result<(), CaptureError> {
+        let qh = self.queue.handle();
+        self.state.sync_done = false;
+        let _sync = conn.display().sync(&qh, ());
+        let deadline = Instant::now() + capture_timeout();
+        dispatch_until(conn, &mut self.queue, &mut self.state, deadline, |s| {
+            s.sync_done
+        })
+    }
+}
+
 /// An open connection to the compositor with the globals required for screenshotting bound.
 #[derive(Clone)]
 pub struct WaylandConnection {
     pub conn: Connection,
     pub registry: WlRegistry,
     pub shm: WlShm,
-    pub outputs: Vec<OutputInfo>,
+    outputs: Arc<Mutex<OutputRegistry>>,
     pub weston_capture: Option<WestonCaptureV1>,
     pub wlr_screencopy: Option<ZwlrScreencopyManagerV1>,
     pub capabilities: Capabilities,
 }
 
 impl WaylandConnection {
+    /// Pull current output geometry and membership from the compositor.
+    ///
+    /// Call this before reading outputs on a connection that has been held across requests;
+    /// `capture_on` does it for you.
+    pub fn refresh_outputs(&self) -> Result<(), CaptureError> {
+        self.outputs.lock().unwrap().refresh(&self.conn)
+    }
+
+    /// Snapshot of the outputs currently known, in discovery order.
+    pub fn outputs(&self) -> Vec<OutputInfo> {
+        self.outputs.lock().unwrap().state.outputs.clone()
+    }
+
     /// Resolve an [`OutputSelector`] against the discovered outputs.
-    pub fn select_output(&self, selector: &OutputSelector) -> Option<&OutputInfo> {
+    pub fn select_output(&self, selector: &OutputSelector) -> Option<OutputInfo> {
+        let registry = self.outputs.lock().unwrap();
+        let outputs = &registry.state.outputs;
         match selector {
-            OutputSelector::First => self.outputs.first(),
-            OutputSelector::Index(i) => self.outputs.get(*i),
-            OutputSelector::Name(n) => self
-                .outputs
+            OutputSelector::First => outputs.first().cloned(),
+            OutputSelector::Index(i) => outputs.get(*i).cloned(),
+            OutputSelector::Name(n) => outputs
                 .iter()
-                .find(|o| o.name.as_deref() == Some(n.as_str())),
+                .find(|o| o.name.as_deref() == Some(n.as_str()))
+                .cloned(),
         }
     }
 }
 
 // State used while enumerating and binding globals. Output metadata is collected here as the
-// compositor replies to the initial bind with geometry/name/mode events.
+// compositor replies to the initial bind with geometry/name/mode events, and kept current
+// afterwards by the same queue.
 #[derive(Default)]
 struct ProbeState {
     outputs: Vec<OutputInfo>,
+    // Set when a wl_display.sync callback fires, which bounds a refresh.
+    sync_done: bool,
 }
 
 /// Connect to the compositor named by `WAYLAND_DISPLAY` and discover screenshot capabilities.
@@ -135,14 +225,9 @@ pub fn connect() -> Result<WaylandConnection, CaptureError> {
             // event queue, because `done` is emitted on the global itself.
             "agl_screenshooter" => caps.agl_screenshooter = Some(info),
             "wl_output" => {
-                let idx = state.outputs.len();
-                let wl_output = registry.bind::<WlOutput, _, _>(g.name, g.version.min(4), &qh, idx);
-                state.outputs.push(OutputInfo {
-                    wl_output,
-                    name: None,
-                    width: 0,
-                    height: 0,
-                });
+                let wl_output =
+                    registry.bind::<WlOutput, _, _>(g.name, g.version.min(4), &qh, g.name);
+                state.outputs.push(OutputInfo::new(g.name, wl_output));
             }
             _ => {}
         }
@@ -160,7 +245,10 @@ pub fn connect() -> Result<WaylandConnection, CaptureError> {
         conn,
         registry: registry.clone(),
         shm,
-        outputs: state.outputs,
+        outputs: Arc::new(Mutex::new(OutputRegistry {
+            queue: event_queue,
+            state,
+        })),
         weston_capture,
         wlr_screencopy,
         capabilities: caps,
@@ -169,27 +257,57 @@ pub fn connect() -> Result<WaylandConnection, CaptureError> {
 
 impl wayland_client::Dispatch<WlRegistry, GlobalListContents> for ProbeState {
     fn event(
-        _state: &mut Self,
-        _proxy: &WlRegistry,
-        _event: wayland_client::protocol::wl_registry::Event,
+        state: &mut Self,
+        registry: &WlRegistry,
+        event: wl_registry::Event,
         _data: &GlobalListContents,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
-        // Globals are enumerated up front via GlobalList; runtime add/remove is ignored.
+        // Capture globals are enumerated once up front — a compositor withdrawing one mid-run
+        // surfaces as a protocol error on the next capture, which invalidates the connection.
+        // Outputs are different: they come and go on a running IVI system, so they are tracked.
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } if interface == "wl_output" => {
+                if state.outputs.iter().any(|o| o.global_name == name) {
+                    return;
+                }
+                let wl_output = registry.bind::<WlOutput, _, _>(name, version.min(4), qh, name);
+                state.outputs.push(OutputInfo::new(name, wl_output));
+            }
+            wl_registry::Event::GlobalRemove { name } => {
+                let Some(pos) = state.outputs.iter().position(|o| o.global_name == name) else {
+                    return;
+                };
+                let removed = state.outputs.remove(pos);
+                // `release` is the v3+ destructor; on older outputs the proxy just goes away.
+                if removed.wl_output.version() >= 3 {
+                    removed.wl_output.release();
+                }
+            }
+            _ => {}
+        }
     }
 }
 
-impl wayland_client::Dispatch<WlOutput, usize> for ProbeState {
+impl wayland_client::Dispatch<WlOutput, u32> for ProbeState {
     fn event(
         state: &mut Self,
         _proxy: &WlOutput,
         event: wl_output::Event,
-        data: &usize,
+        global_name: &u32,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        let Some(out) = state.outputs.get_mut(*data) else {
+        let Some(out) = state
+            .outputs
+            .iter_mut()
+            .find(|o| o.global_name == *global_name)
+        else {
             return;
         };
         match event {
@@ -202,11 +320,30 @@ impl wayland_client::Dispatch<WlOutput, usize> for ProbeState {
                 out.width = width;
                 out.height = height;
             }
+            wl_output::Event::Geometry {
+                transform: WEnum::Value(t),
+                ..
+            } => {
+                out.transform = t;
+            }
             wl_output::Event::Name { name } => {
                 out.name = Some(name);
             }
             _ => {}
         }
+    }
+}
+
+impl wayland_client::Dispatch<WlCallback, ()> for ProbeState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlCallback,
+        _event: wayland_client::protocol::wl_callback::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        state.sync_done = true;
     }
 }
 

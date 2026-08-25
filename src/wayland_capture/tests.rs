@@ -300,3 +300,70 @@ mod backend_selection_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod output_transform_tests {
+    use crate::probe::transform_swaps_axes;
+    use wayland_client::protocol::wl_output::Transform;
+
+    /// The agl backend derives its buffer geometry from `wl_output.mode`, which is the physical
+    /// pre-transform size. Getting this predicate wrong is what would make a portrait output
+    /// capture at the wrong shape.
+    #[test]
+    fn quarter_turns_swap_axes() {
+        for t in [
+            Transform::_90,
+            Transform::_270,
+            Transform::Flipped90,
+            Transform::Flipped270,
+        ] {
+            assert!(transform_swaps_axes(t), "{t:?} should swap axes");
+        }
+    }
+
+    #[test]
+    fn half_turns_and_flips_keep_axes() {
+        // A flip mirrors within the same axes, so 180 and the un-rotated flip do not swap.
+        for t in [
+            Transform::Normal,
+            Transform::_180,
+            Transform::Flipped,
+            Transform::Flipped180,
+        ] {
+            assert!(!transform_swaps_axes(t), "{t:?} should not swap axes");
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_connection_tests {
+    use crate::probe;
+
+    /// The connection is cached across portal requests, so its output list has to survive being
+    /// re-read repeatedly. The regression this guards: output state was snapshotted on an event
+    /// queue that died when `connect()` returned, so nothing could refresh it afterwards.
+    #[test]
+    fn outputs_can_be_refreshed_repeatedly_on_a_cached_connection() {
+        let Ok(conn) = probe::connect() else {
+            eprintln!("skipping: no Wayland compositor in this environment");
+            return;
+        };
+
+        let first = conn.outputs();
+        for round in 0..3 {
+            conn.refresh_outputs()
+                .unwrap_or_else(|e| panic!("refresh {round} failed: {e}"));
+            let now = conn.outputs();
+            // Nothing is hotplugging under a unit test, so membership should be stable.
+            assert_eq!(
+                now.len(),
+                first.len(),
+                "output count changed on refresh {round}"
+            );
+            for (a, b) in first.iter().zip(now.iter()) {
+                assert_eq!(a.global_name, b.global_name, "output identity churned");
+                assert_eq!((a.width, a.height), (b.width, b.height), "geometry churned");
+            }
+        }
+    }
+}

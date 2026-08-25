@@ -39,8 +39,11 @@ fn main() {
         conn.capabilities.selected_capture_backend()
     );
     eprintln!("  outputs:");
-    for (i, o) in conn.outputs.iter().enumerate() {
-        eprintln!("    [{i}] name={:?} {}x{}", o.name, o.width, o.height);
+    for (i, o) in conn.outputs().iter().enumerate() {
+        eprintln!(
+            "    [{i}] name={:?} {}x{} transform={:?}",
+            o.name, o.width, o.height, o.transform
+        );
     }
 
     // Pick the requested output; if the name isn't found (e.g. the compositor doesn't send

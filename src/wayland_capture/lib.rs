@@ -24,7 +24,7 @@ pub mod registry;
 mod tests;
 
 pub use capture::types::{CaptureError, PixelBuffer, PixelData, PixelFormat};
-pub use probe::{OutputSelector, WaylandConnection};
+pub use probe::{OutputInfo, OutputSelector, WaylandConnection};
 
 use capture::WlrScreencopy;
 use capture::WlrScreencopyState;
@@ -54,6 +54,11 @@ pub fn capture_on(
     connection: &WaylandConnection,
     selector: &OutputSelector,
 ) -> Result<PixelBuffer, CaptureError> {
+    // A connection can be cached across requests, so the output list has to be re-read rather
+    // than trusted: a mode change or a hotplug since the last capture would otherwise leave the
+    // agl backend sizing its buffer from geometry that no longer exists.
+    connection.refresh_outputs()?;
+
     let output = connection
         .select_output(selector)
         .ok_or_else(|| CaptureError::CaptureFailed(format!("no such output: {selector:?}")))?;
@@ -83,6 +88,7 @@ pub fn capture_on(
                 &output.wl_output,
                 output.width,
                 output.height,
+                output.swaps_axes(),
             )
         }
         Some(SelectedCapturebackend::WlrScreencopy) => {
