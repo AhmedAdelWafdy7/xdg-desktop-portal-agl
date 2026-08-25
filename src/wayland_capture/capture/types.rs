@@ -37,7 +37,7 @@ pub enum CaptureError {
     Timeout(std::time::Duration),
 }
 
-// Pixel format of the captured frame. Mirrioring the wl_shm_format on embedded targets.
+// Pixel format of the captured frame. Mirrors the wl_shm_format on embedded targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
     Xrgb8888,
@@ -62,10 +62,17 @@ const DRM_FORMAT_RGB565: u32 = 0x36314752; // 'RG16'
 impl PixelFormat {
     // Convert a raw wl_shm format code to a PixelFormat enum variant. wl_shm uses 0 and 1
     // for ARGB8888 and XRGB8888 respectively, and the DRM FourCC value for everything else.
+    //
+    // The DRM codes for ARGB/XRGB are accepted too. Per wl_shm they should never arrive on this
+    // path, but a compositor that sends the FourCC anyway would otherwise land in `Unknown` and
+    // fail the capture as an unsupported format; the two encodings cannot collide, so taking
+    // both costs nothing.
     pub fn from_raw(raw: u32) -> Self {
         match raw {
             0x00000000 => Self::Argb8888,
             0x00000001 => Self::Xrgb8888,
+            DRM_FORMAT_ARGB8888 => Self::Argb8888,
+            DRM_FORMAT_XRGB8888 => Self::Xrgb8888,
             DRM_FORMAT_ABGR8888 => Self::Abgr8888,
             DRM_FORMAT_XBGR8888 => Self::Xbgr8888,
             DRM_FORMAT_RGB565 => Self::Rgb565,

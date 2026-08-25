@@ -123,15 +123,24 @@ mod format_conversion_tests {
 
     #[test]
     fn drm_xrgb_is_not_confused_with_wl_shm_xrgb() {
-        // wl_shm XRGB8888 is 1; DRM XRGB8888 is 0x34325258. They must not collide.
+        // wl_shm XRGB8888 is 1; DRM XRGB8888 is 0x34325258. Both name the same format, and the
+        // two encodings cannot collide, so `from_raw` resolves either to Xrgb8888 rather than
+        // dropping a misencoded DRM code into `Unknown` and failing the capture.
         assert_eq!(PixelFormat::from_raw(1), PixelFormat::Xrgb8888);
         assert_eq!(
             PixelFormat::from_drm_fourcc(0x34325258),
             PixelFormat::Xrgb8888
         );
+        assert_eq!(PixelFormat::from_raw(0x34325258), PixelFormat::Xrgb8888);
+        assert_eq!(PixelFormat::from_raw(0x34325241), PixelFormat::Argb8888);
+    }
+
+    #[test]
+    fn genuinely_unknown_codes_are_still_preserved() {
+        // Widening from_raw must not swallow codes the crate does not name.
         assert_eq!(
-            PixelFormat::from_raw(0x34325258),
-            PixelFormat::Unknown(0x34325258)
+            PixelFormat::from_raw(0xDEADBEEF),
+            PixelFormat::Unknown(0xDEADBEEF)
         );
     }
 
